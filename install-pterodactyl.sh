@@ -27,9 +27,17 @@ if [[ "$(uname -m)" != "x86_64" ]]; then
   exit 1
 fi
 
+# Seguridad: este instalador es para una instalacion nueva.
+# No sobrescribe un Panel existente para proteger APP_KEY y la base.
+if [[ -f "${PANEL_DIR}/.env" || -f "${PANEL_DIR}/artisan" ]]; then
+  echo "[ERROR] Ya parece existir Pterodactyl en ${PANEL_DIR}."
+  echo "La v2 no sobrescribe instalaciones existentes."
+  exit 1
+fi
+
 clear || true
 echo "=================================================="
-echo " PTERODACTYL + WINGS - INSTALADOR LAN"
+echo " PTERODACTYL + WINGS - INSTALADOR LAN v2"
 echo " Ubuntu Server 24.04 LTS / amd64"
 echo "=================================================="
 echo
@@ -60,7 +68,7 @@ while true; do
 done
 
 # DB password only uses URL/shell-safe alphanumeric chars.
-DB_PASS="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32)"
+DB_PASS="$(openssl rand -hex 24)"
 APP_URL="http://${SERVER_IP}"
 
 cat <<EOF
@@ -75,6 +83,17 @@ Se instalara:
 NOTA: este script NO cambia la IP de Ubuntu. ${SERVER_IP} debe estar ya configurada
       en una interfaz del servidor (o deberas configurarla luego en Netplan).
 EOF
+# Validar que la IP elegida ya exista antes de modificar el sistema.
+if ! ip -4 -o addr show | awk '{print $4}' | cut -d/ -f1 | grep -Fxq "$SERVER_IP"; then
+  echo
+  echo "[ERROR] La IP ${SERVER_IP} no esta configurada actualmente en Ubuntu."
+  echo "Direcciones detectadas:"
+  ip -4 -br addr
+  echo
+  echo "Configura primero la IP fija/reserva y vuelve a ejecutar el instalador."
+  exit 1
+fi
+
 read -rp "Continuar? [S/n]: " CONFIRM
 CONFIRM="${CONFIRM:-S}"
 [[ "$CONFIRM" =~ ^[SsYy]$ ]] || exit 0
@@ -85,7 +104,7 @@ echo "[1/12] Actualizando Ubuntu e instalando dependencias..."
 apt-get update
 apt-get upgrade -y
 apt-get install -y ca-certificates curl gnupg software-properties-common apt-transport-https \
-  nginx mariadb-server redis-server tar unzip git cron ufw \
+  nginx mariadb-server redis-server tar unzip git cron ufw openssl \
   php8.3 php8.3-common php8.3-cli php8.3-gd php8.3-mysql php8.3-mbstring \
   php8.3-bcmath php8.3-xml php8.3-fpm php8.3-curl php8.3-zip
 systemctl enable --now nginx mariadb redis-server php8.3-fpm cron
@@ -257,17 +276,19 @@ systemctl daemon-reload
 systemctl enable wings.service
 # Do NOT start Wings until /etc/pterodactyl/config.yml exists.
 
-echo "[10/12] Configurando firewall UFW para la LAN..."
-ufw --force reset
-ufw default deny incoming
-ufw default allow outgoing
+echo "[10/12] Agregando reglas UFW para la LAN sin borrar reglas existentes..."
 ufw allow from "$LAN_CIDR" to any port 22 proto tcp comment 'SSH LAN'
 ufw allow from "$LAN_CIDR" to any port 80 proto tcp comment 'Pterodactyl Panel LAN'
 ufw allow from "$LAN_CIDR" to any port 8080 proto tcp comment 'Pterodactyl Wings LAN'
 ufw allow from "$LAN_CIDR" to any port 2022 proto tcp comment 'Pterodactyl SFTP LAN'
 ufw allow from "$LAN_CIDR" to any port 27015 proto udp comment 'CS2 LAN'
 ufw allow from "$LAN_CIDR" to any port 27020 proto udp comment 'CS2 GOTV LAN'
-ufw --force enable
+
+if ufw status | grep -q '^Status: inactive'; then
+  ufw --force enable
+else
+  ufw reload
+fi
 
 echo "[11/12] Guardando datos y ejecutando comprobaciones..."
 install -m 600 /dev/null /root/pterodactyl-install-credentials.txt
@@ -279,6 +300,7 @@ Panel admin username: ${ADMIN_USER}
 Database: ${DB_NAME}
 Database user: ${DB_USER}
 Database password: ${DB_PASS}
+APP_KEY: $(grep '^APP_KEY=' "${PANEL_DIR}/.env" | cut -d= -f2-)
 Wings config pending: /etc/pterodactyl/config.yml
 EOF
 
